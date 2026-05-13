@@ -1,0 +1,36 @@
+{
+  "feeds": [
+    {
+      "name": "Reuters Business",
+      "url": "https://feeds.reuters.com/reuters/businessNews"
+    },
+    {
+      "name": "CNBC Markets",
+      "url": "https://www.cnbc.com/id/20910258/device/rss/rss.html"
+    },
+    {
+      "name": "MarketWatch Top Stories",
+      "url": "https://feeds.marketwatch.com/marketwatch/topstories/"
+    },
+    {
+      "name": "Yahoo Finance",
+      "url": "https://finance.yahoo.com/news/rssindex"
+    },
+    {
+      "name": "Seeking Alpha Market Currents",
+      "url": "https://seekingalpha.com/market_currents.xml"
+    },
+    {
+      "name": "WSJ Markets",
+      "url": "https://feeds.content.dowjones.io/public/rss/mw_marketpulse"
+    },
+    {
+      "name": "Barron's",
+      "url": "https://www.barrons.com/xml/rss/3_7516.xml"
+    },
+    {
+      "name": "The Motley Fool",
+      "url": "https://www.fool.com/feeds/index.aspx"
+    }
+  ]
+}

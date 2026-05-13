@@ -1,0 +1,71 @@
+# ═══════════════════════════════════════════════════════════════
+#  JARVIS — Anish Kumar Boddu
+#  OpenJarvis config · McKinney TX · UTD Finance · May 2026
+#  Place at: ~/.openjarvis/config.toml
+# ═══════════════════════════════════════════════════════════════
+
+# ── LLM Engine (local via Ollama, free after install) ──────────
+[engine]
+default = "ollama"
+
+[intelligence]
+default_model = "qwen3.5:9b"       # Best balance on most laptops
+# default_model = "qwen3.5:4b"     # Use if qwen3.5:9b is slow on your machine
+
+[agent]
+default_agent = "simple"
+
+[tools]
+enabled = [
+  "digest_collect",
+  "text_to_speech",
+  "web_search",
+  "file_read",
+  "shell_exec",
+]
+
+# ── Morning Digest ─────────────────────────────────────────────
+[digest]
+enabled   = true
+schedule  = "0 7 * * 1-5"          # Weekdays at 7:00 AM Central (skip weekends)
+timezone  = "America/Chicago"       # McKinney TX = Central Time
+persona   = "jarvis_anish"         # custom persona file (see personas/ folder)
+honorific = "sir"
+
+# Voice: Cartesia "Alistair" — the authentic British Jarvis voice
+# Get a free key at https://play.cartesia.ai (2,500 chars/month free)
+tts_backend = "cartesia"
+voice_id    = "c8f7835e-28a3-4f0c-80d7-c1302ac62aae"   # Alistair, British male
+voice_speed = 1.15
+
+# Fallback: OpenAI TTS if you don't want Cartesia
+# tts_backend = "openai"
+# voice_id    = "onyx"
+
+# Sections in briefing order
+sections = ["calendar", "messages", "world"]
+
+# ── Calendar ───────────────────────────────────────────────────
+[digest.calendar]
+sources      = ["gcalendar"]
+max_events   = 8
+look_ahead_days = 3               # Look 3 days ahead (catches week-of deadlines)
+
+# ── Messages (Email + Tasks) ───────────────────────────────────
+[digest.messages]
+sources = ["gmail", "google_tasks"]
+# Uncomment if you set up iMessage on Mac:
+# sources = ["gmail", "google_tasks", "imessage"]
+
+# ── World (Finance-focused news) ───────────────────────────────
+[digest.world]
+sources   = ["news_rss"]
+max_items = 8
+
+# ── Optional: add fitness once you hook up Apple Health export ─
+# [digest.health]
+# sources = ["apple_health"]
+
+# ── Logging ────────────────────────────────────────────────────
+[logging]
+level = "WARNING"                   # Keep output clean; change to INFO to debug

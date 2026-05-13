@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Jarvis Clap Trigger</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #000;
+    color: #00d4ff;
+    font-family: 'Courier New', monospace;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+  }
+  .ring {
+    width: 180px; height: 180px;
+    border-radius: 50%;
+    border: 3px solid #00d4ff;
+    display: flex; align-items: center; justify-content: center;
+    position: relative;
+    transition: border-color 0.1s, box-shadow 0.1s;
+    margin-bottom: 32px;
+  }
+  .ring.active {
+    border-color: #00ff88;
+    box-shadow: 0 0 40px #00ff8860, 0 0 80px #00ff8830;
+  }
+  .ring.launch {
+    border-color: #ffffff;
+    box-shadow: 0 0 60px #ffffff80;
+    animation: pulse 0.4s ease-out;
+  }
+  @keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.12); }
+    100% { transform: scale(1); }
+  }
+  .icon { font-size: 64px; }
+  .status {
+    font-size: 13px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: #1e4060;
+    margin-bottom: 12px;
+    transition: color 0.2s;
+  }
+  .status.listening { color: #00d4ff; }
+  .status.heard { color: #00ff88; }
+  .status.launching { color: #ffffff; }
+  .title {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: 6px;
+    color: #00d4ff;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    font-size: 11px;
+    color: #1a3040;
+    letter-spacing: 2px;
+    margin-bottom: 48px;
+  }
+  .bar-container {
+    display: flex;
+    gap: 4px;
+    align-items: flex-end;
+    height: 40px;
+    margin-top: 32px;
+  }
+  .bar {
+    width: 6px;
+    background: #0d2030;
+    border-radius: 3px;
+    transition: height 0.05s, background 0.05s;
+    min-height: 4px;
+  }
+  .tip {
+    margin-top: 32px;
+    font-size: 11px;
+    color: #152535;
+    letter-spacing: 1px;
+  }
+  .dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #1a3040;
+    margin: 0 4px;
+    transition: background 0.1s;
+  }
+  .dot.filled { background: #00ff88; }
+  .dots { margin-top: 16px; }
+  #micBtn {
+    margin-top: 40px;
+    background: rgba(0,180,220,0.1);
+    border: 1px solid rgba(0,180,220,0.3);
+    color: #00d4ff;
+    padding: 10px 28px;
+    border-radius: 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    letter-spacing: 2px;
+    cursor: pointer;
+    text-transform: uppercase;
+  }
+  #micBtn:hover { background: rgba(0,180,220,0.2); }
+</style>
+</head>
+<body>
+
+<div class="title">J A R V I S</div>
+<div class="subtitle">CLAP TRIGGER · ALWAYS ON</div>
+
+<div class="ring" id="ring">
+  <span class="icon">👏</span>
+</div>
+
+<div class="status" id="status">STANDBY</div>
+
+<div class="dots">
+  <span class="dot" id="dot1"></span>
+  <span class="dot" id="dot2"></span>
+</div>
+
+<div class="bar-container" id="bars">
+  <!-- 24 bars injected by JS -->
+</div>
+
+<button id="micBtn" onclick="startListening()">ACTIVATE MIC</button>
+
+<div class="tip" id="tip">Click ACTIVATE MIC · then clap twice to open Jarvis</div>
+
+<script>
+// ── CONFIG ───────────────────────────────────────────────
+// Replace with your actual Claude Jarvis project URL
+const JARVIS_URL = 'https://claude.ai/project/YOUR_PROJECT_ID_HERE';
+
+// Clap detection settings
+const CLAP_THRESHOLD    = 0.25;   // Volume threshold (0–1). Lower = more sensitive
+const CLAP_WINDOW_MS    = 1200;   // Two claps must happen within this window (ms)
+const COOLDOWN_MS       = 2500;   // Ignore claps after launch for this long
+// ─────────────────────────────────────────────────────────
+
+const NUM_BARS = 24;
+const barsEl   = document.getElementById('bars');
+const ringEl   = document.getElementById('ring');
+const statusEl = document.getElementById('status');
+const dot1El   = document.getElementById('dot1');
+const dot2El   = document.getElementById('dot2');
+const tipEl    = document.getElementById('tip');
+
+// Build visualizer bars
+const bars = [];
+for (let i = 0; i < NUM_BARS; i++) {
+  const b = document.createElement('div');
+  b.className = 'bar';
+  b.style.height = '4px';
+  barsEl.appendChild(b);
+  bars.push(b);
+}
+
+let audioCtx = null, analyser = null, dataArr = null;
+let lastClapTime  = 0;
+let firstClapTime = 0;
+let clapCount     = 0;
+let cooldownUntil = 0;
+let animFrame     = null;
+let listening     = false;
+
+async function startListening() {
+  if (listening) return;
+  document.getElementById('micBtn').style.display = 'none';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
+    analyser  = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.5;
+    dataArr   = new Uint8Array(analyser.frequencyBinCount);
+    const src = audioCtx.createMediaStreamSource(stream);
+    src.connect(analyser);
+    listening = true;
+    statusEl.textContent = 'LISTENING';
+    statusEl.className   = 'status listening';
+    tipEl.textContent    = 'Clap once · · · then once more';
+    resetClaps();
+    loop();
+  } catch (e) {
+    statusEl.textContent = 'MIC DENIED';
+    tipEl.textContent    = 'Please allow microphone access';
+    document.getElementById('micBtn').style.display = 'block';
+  }
+}
+
+function loop() {
+  analyser.getByteTimeDomainData(dataArr);
+
+  // RMS volume
+  let sum = 0;
+  for (let v of dataArr) { const d = v / 128 - 1; sum += d * d; }
+  const rms = Math.sqrt(sum / dataArr.length);
+
+  // Update visualizer bars
+  analyser.getByteFrequencyData(dataArr);
+  const chunk = Math.floor(dataArr.length / NUM_BARS);
+  bars.forEach((b, i) => {
+    let avg = 0;
+    for (let j = 0; j < chunk; j++) avg += dataArr[i * chunk + j];
+    avg /= (chunk * 255);
+    const h = Math.max(4, Math.round(avg * 36));
+    b.style.height = h + 'px';
+    b.style.background = clapCount > 0
+      ? `hsl(${150 + avg * 60}, 80%, 55%)`
+      : `hsl(${200 + avg * 30}, 60%, ${15 + avg * 25}%)`;
+  });
+
+  const now = Date.now();
+
+  if (rms > CLAP_THRESHOLD && now > cooldownUntil) {
+    // Debounce: don't register same clap twice
+    if (now - lastClapTime > 200) {
+      lastClapTime = now;
+      onClap(now);
+    }
+  }
+
+  animFrame = requestAnimationFrame(loop);
+}
+
+function onClap(now) {
+  clapCount++;
+  if (clapCount === 1) {
+    firstClapTime = now;
+    dot1El.classList.add('filled');
+    ringEl.classList.add('active');
+    statusEl.textContent = 'CLAP 1 ✓';
+    statusEl.className   = 'status heard';
+  } else if (clapCount === 2) {
+    const gap = now - firstClapTime;
+    if (gap < CLAP_WINDOW_MS) {
+      dot2El.classList.add('filled');
+      ringEl.classList.remove('active');
+      ringEl.classList.add('launch');
+      statusEl.textContent = 'LAUNCHING JARVIS';
+      statusEl.className   = 'status launching';
+      tipEl.textContent    = 'Good morning, sir.';
+      cooldownUntil = now + COOLDOWN_MS;
+      setTimeout(() => {
+        window.open(JARVIS_URL, '_blank');
+        setTimeout(resetClaps, 1800);
+      }, 300);
+    } else {
+      // Too slow — treat this clap as first
+      firstClapTime = now;
+      clapCount     = 1;
+      dot2El.classList.remove('filled');
+    }
+  }
+}
+
+function resetClaps() {
+  clapCount = 0;
+  dot1El.classList.remove('filled');
+  dot2El.classList.remove('filled');
+  ringEl.classList.remove('active', 'launch');
+  statusEl.textContent = 'LISTENING';
+  statusEl.className   = 'status listening';
+  tipEl.textContent    = 'Clap once · · · then once more';
+}
+</script>
+</body>
+</html>
