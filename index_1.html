@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JARVIS</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Inter:wght@400;500;600;700;900&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{background:#000;height:100%;overflow-x:hidden;}
+body{color:#cce0f5;font-family:'Inter',-apple-system,sans-serif;}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-thumb{background:rgba(0,180,220,0.2);border-radius:4px;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const{useState,useEffect,useCallback,useRef}=React;
+
+const ALL_TICKERS=["NVDA","MU","AMSC","SMH","QQQM","QQQ","MAGS","QTUM","NUKZ","SPGP"];
+const FUT_TICKERS=["ES=F","NQ=F","CL=F"];
+const FUT_NAMES={["ES=F"]:"ES",["NQ=F"]:"NQ",["CL=F"]:"OIL"};
+const GROUPS=[
+  {label:"Core",tickers:["NVDA","MU","AMSC"]},
+  {label:"ETFs",tickers:["SMH","QQQM","QQQ","MAGS"]},
+  {label:"Thematic",tickers:["QTUM","NUKZ","SPGP"]},
+];
+const WMO={0:["Clear","☀️"],1:["Mainly Clear","🌤️"],2:["Partly Cloudy","⛅"],3:["Overcast","☁️"],
+  45:["Foggy","🌫️"],51:["Drizzle","🌦️"],61:["Light Rain","🌧️"],63:["Rain","🌧️"],80:["Showers","🌦️"],95:["Thunderstorm","⛈️"]};
+const getWMO=c=>WMO[c]||WMO[Math.floor(c/10)*10]||["—","🌡️"];
+
+// ── JARVIS PERSONALITY ─────────────────────────────────────────
+const JARVIS_SYS=`You are JARVIS — Anish Boddu's personal AI. British, dry, sharp. Like talking to a smart friend, not a report.
+
+RULES:
+- 1 to 3 sentences MAX for normal questions. Never longer unless asked for a full briefing.
+- Be casual and direct. No fluff. No filler phrases.
+- "sir" once or twice, naturally.
+- Plain text only. No markdown, no bullet points, no symbols. This is spoken aloud.
+- If asked something you don't know, say so in one sentence and move on.
+
+Anish: 20, UTD Finance sophomore, micro1 AI Specialist, runs Bubba's Fireworks, invests in semis and AI (NVDA MU AMSC SMH QQQM QQQ MAGS QTUM NUKZ SPGP), cutting to ~155 lbs, McKinney TX.`;
+
+// ── UTILS ───────────────────────────────────────────────────────
+const daysUntil=d=>{const t=new Date();t.setHours(0,0,0,0);const x=new Date(d);x.setHours(0,0,0,0);return Math.round((x-t)/86400000);};
+const fmtCD=s=>`${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+
+// ── MULTI-PROXY FETCH ───────────────────────────────────────────
+const PROXIES=[
+  u=>`https://corsproxy.io/?${encodeURIComponent(u)}`,
+  u=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  u=>`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+];
+async function proxyFetch(url,timeout=6000){
+  for(const proxy of PROXIES){
+    try{
+      const ctrl=new AbortController();
+      const t=setTimeout(()=>ctrl.abort(),timeout);
+      const r=await fetch(proxy(url),{signal:ctrl.signal});
+      clearTimeout(t);
+      if(r.ok)return await r.json();
+    }catch{}
+  }
+  throw new Error("all proxies failed");
+}
+
+// ── YAHOO FINANCE (BATCH) ───────────────────────────────────────
+async function fetchQuotes(tickers){
+  const syms=tickers.join(",");
+  const url=`https://query2.finance.yahoo.com/v7/finance/quote?symbols=${syms}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent`;
+  const d=await proxyFetch(url);
+  const quotes=d?.quoteResponse?.result||[];
+  const map={};
+  quotes.forEach(q=>{
+    map[q.symbol]={
+      ticker:q.symbol,
+      price:q.regularMarketPrice,
+      change:q.regularMarketChange,
+      pct:q.regularMarketChangePercent,
+    };
+  });
+  return map;
+}
+
+// ── GROQ AI ─────────────────────────────────────────────────────
+async function groq(messages,system,key,maxTokens=300){
+  const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","Authorization":`Bearer ${key}`},
+    body:JSON.stringify({
+      model:"llama-3.3-70b-versatile",
+      messages:[{role:"system",content:system},...messages],
+      max_tokens:maxTokens,temperature:0.8,
+    })
+  });
+  if(!r.ok){const e=await r.json();throw new Error(e.error?.message||r.status);}
+  return(await r.json()).choices?.[0]?.message?.content||"";
+}
+
+// ── VOICE ENGINE ─────────────────────────────────────────────────
+let _voice=null;
+const VOICE_PREFS=["Daniel","Google UK English Male","Microsoft George","Karen","Samantha","Alex"];
+function initVoice(){
+  return new Promise(res=>{
+    const pick=()=>{
+      const voices=speechSynthesis.getVoices();
+      // Try preferred voices in order
+      for(const name of VOICE_PREFS){
+        const v=voices.find(x=>x.name===name);
+        if(v){_voice=v;break;}
+      }
+      // Fall back to any en-GB, then any English
+      if(!_voice)_voice=voices.find(v=>v.lang==="en-GB")||voices.find(v=>v.lang.startsWith("en"))||voices[0];
+      res();
+    };
+    if(speechSynthesis.getVoices().length)pick();
+    else speechSynthesis.onvoiceschanged=pick;
+  });
+}
+let _speaking=false;
+function speak(text,onEnd){
+  speechSynthesis.cancel();_speaking=true;
+  const u=new SpeechSynthesisUtterance(text);
+  if(_voice)u.voice=_voice;
+  u.rate=0.9;u.pitch=0.85;u.volume=1;
+  u.onend=()=>{_speaking=false;if(onEnd)onEnd();};
+  u.onerror=()=>{_speaking=false;if(onEnd)onEnd();};
+  speechSynthesis.speak(u);
+}
+function stopSpeaking(){speechSynthesis.cancel();_speaking=false;}
+
+// ── STYLES ──────────────────────────────────────────────────────
+const C={
+  card:{background:"#0a0a0a",border:"1px solid #1a2e3a",borderRadius:12,padding:12},
+  label:{fontSize:9,fontWeight:700,letterSpacing:"1.8px",color:"#3db8d4",textTransform:"uppercase",fontFamily:"'JetBrains Mono',monospace"},
+  dim:{fontSize:11,color:"#1e3040",fontStyle:"italic"},
+  mono:{fontFamily:"'JetBrains Mono',monospace"},
+  pos:"#22c55e",neg:"#ef4444",
+};
+function Spin({onClick,spinning}){
+  return<button onClick={onClick} style={{background:"none",border:"none",color:"#3db8d4",cursor:"pointer",fontSize:15,padding:0,lineHeight:1,...C.mono,animation:spinning?"spin 1s linear infinite":"none",opacity:spinning?.4:.8}}>↺</button>;
+}
+
+// ── GROQ SETUP MODAL ─────────────────────────────────────────────
+function GroqModal({onSave,onSkip}){
+  const[key,setKey]=useState("");const[err,setErr]=useState("");const[busy,setBusy]=useState(false);
+  const test=async()=>{
+    if(!key.trim().startsWith("gsk_")){setErr("Groq keys start with gsk_");return;}
+    setBusy(true);setErr("");
+    try{
+      await groq([{role:"user",content:"Say: Online."}],"You are JARVIS.",key.trim(),10);
+      onSave(key.trim());
+    }catch(e){setErr("Failed — check your key at console.groq.com");}
+    setBusy(false);
+  };
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999}}>
+      <div style={{...C.card,maxWidth:400,width:"90%",padding:28,borderColor:"#1a3a4a"}}>
+        <div style={{...C.label,marginBottom:12}}>Connect AI — Free Forever</div>
+        <div style={{fontSize:12,color:"#4a7090",lineHeight:"1.9",marginBottom:20}}>
+          <strong style={{color:"#70b0c8"}}>Groq is 100% free</strong> — no card needed.<br/>
+          1. Go to <strong style={{color:"#5090b0"}}>console.groq.com</strong><br/>
+          2. Sign up with Google<br/>
+          3. API Keys → Create → paste below
+        </div>
+        <input type="password" value={key} onChange={e=>setKey(e.target.value)} onKeyDown={e=>e.key==="Enter"&&test()} placeholder="gsk_..." autoFocus
+          style={{width:"100%",background:"#111",border:"1px solid #1a2e3a",borderRadius:8,padding:"10px 12px",color:"#cce0f5",fontSize:12,outline:"none",...C.mono,marginBottom:8}}/>
+        {err&&<div style={{fontSize:11,color:"#ef4444",marginBottom:8}}>{err}</div>}
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={test} disabled={busy} style={{flex:1,background:"rgba(34,197,94,0.15)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,color:"#22c55e",padding:10,cursor:"pointer",fontSize:11,fontWeight:700,letterSpacing:"1px",opacity:busy?.6:1,fontFamily:"inherit"}}>{busy?"CONNECTING...":"CONNECT FREE AI"}</button>
+          <button onClick={onSkip} style={{background:"none",border:"1px solid #1a2e3a",borderRadius:8,color:"#2a4050",padding:"10px 14px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>Skip</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── EXAM MODAL ───────────────────────────────────────────────────
+function ExamModal({onSave,onClose}){
+  const[name,setName]=useState("");const[date,setDate]=useState("");
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:998}}>
+      <div style={{...C.card,maxWidth:320,width:"90%",padding:24}}>
+        <div style={{...C.label,marginBottom:12}}>Add Exam / Deadline</div>
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. FIN 4300 Final"
+          style={{width:"100%",background:"#111",border:"1px solid #1a2e3a",borderRadius:7,padding:"8px 10px",color:"#cce0f5",fontSize:12,outline:"none",fontFamily:"inherit",marginBottom:8}}/>
+        <input type="date" value={date} onChange={e=>setDate(e.target.value)}
+          style={{width:"100%",background:"#111",border:"1px solid #1a2e3a",borderRadius:7,padding:"8px 10px",color:"#cce0f5",fontSize:12,outline:"none",...C.mono,marginBottom:14,colorScheme:"dark"}}/>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>{if(name&&date)onSave({id:Date.now(),name,date});}} style={{flex:1,background:"rgba(0,150,210,0.15)",border:"1px solid rgba(0,150,210,0.3)",borderRadius:7,color:"#00d4ff",padding:9,cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>Add</button>
+          <button onClick={onClose} style={{background:"none",border:"1px solid #1a2e3a",borderRadius:7,color:"#2a4050",padding:"9px 14px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════
+function Dashboard(){
+  const[time,setTime]=useState(new Date());
+  const[weather,setWeather]=useState(null);
+  const[stocks,setStocks]=useState({});
+  const[futures,setFutures]=useState({});
+  const[stockTime,setStockTime]=useState(null);
+  const[news,setNews]=useState([]);
+  const[spin,setSpin]=useState({w:true,s:true,n:true,f:true});
+  const[nextRefresh,setNextRefresh]=useState(5*60);
+
+  const[groqKey,setGroqKey]=useState(()=>{try{return localStorage.getItem("j-groq")||"";}catch{return "";}});
+  const[showGroq,setShowGroq]=useState(false);
+  const[speaking,setSpeaking]=useState(false);
+  const[listening,setListening]=useState(false);
+  const[voiceHint,setVoiceHint]=useState("");
+  const recRef=useRef(null);
+  const clapRef=useRef({times:[]});
+  const autoBriefDone=useRef(false);
+
+  const[msgs,setMsgs]=useState([]);
+  const[chatIn,setChatIn]=useState("");
+  const[chatBusy,setChatBusy]=useState(false);
+  const chatEnd=useRef(null);
+
+  const[todos,setTodos]=useState([]);
+  const[todoIn,setTodoIn]=useState("");
+  const[userNotes,setUserNotes]=useState("");
+  const[noteDraft,setNoteDraft]=useState("");
+  const[noteOpen,setNoteOpen]=useState(false);
+  const[exams,setExams]=useState([]);
+  const[showExam,setShowExam]=useState(false);
+  const todoRef=useRef(null);
+
+  const go=k=>setSpin(p=>({...p,[k]:true}));
+  const end=k=>setSpin(p=>({...p,[k]:false}));
+
+  // ── INIT ──────────────────────────────────────────────────────
+  useEffect(()=>{
+    initVoice().then(()=>{
+      const h=new Date().getHours();
+      const line=h<12?"Good morning, sir. Pulling everything up now."
+        :h<17?"Good afternoon, sir. Loading your dashboard."
+        :"Good evening, sir. Systems online.";
+      setSpeaking(true);
+      speak(line,()=>setSpeaking(false));
+    });
+    try{
+      const t=localStorage.getItem("j-todos");if(t)setTodos(JSON.parse(t));
+      const n=localStorage.getItem("j-notes");if(n){setUserNotes(n);setNoteDraft(n);}
+      const e=localStorage.getItem("j-exams");if(e)setExams(JSON.parse(e));
+    }catch{}
+    setupClap();
+    return()=>{recRef.current?.stop();};
+  },[]);
+
+  useEffect(()=>{const t=setInterval(()=>setTime(new Date()),1000);return()=>clearInterval(t);},[]);
+  useEffect(()=>{chatEnd.current?.scrollIntoView({behavior:"smooth"});},[msgs,chatBusy]);
+
+  // Stocks refresh every 5 min
+  useEffect(()=>{
+    fetchAll();
+    const r=setInterval(()=>{fetchStocks();fetchFutures();setNextRefresh(5*60);},5*60*1000);
+    const t=setInterval(()=>setNextRefresh(p=>p>0?p-1:5*60),1000);
+    return()=>{clearInterval(r);clearInterval(t);};
+  },[]);
+
+  // Auto-briefing: fires once when stocks load + groqKey exists
+  useEffect(()=>{
+    if(groqKey&&Object.keys(stocks).length>0&&!autoBriefDone.current){
+      autoBriefDone.current=true;
+      setTimeout(()=>sendMsg("Give me a quick market rundown and anything urgent I should know.",false,true),1000);
+    }
+  },[stocks,groqKey]);
+
+  // ── STORAGE ───────────────────────────────────────────────────
+  const saveTodos=l=>{setTodos(l);try{localStorage.setItem("j-todos",JSON.stringify(l));}catch{}};
+  const saveNotes=t=>{setUserNotes(t);try{localStorage.setItem("j-notes",t);}catch{}};
+  const saveExams=l=>{setExams(l);try{localStorage.setItem("j-exams",JSON.stringify(l));}catch{}};
+  const addTodo=()=>{const t=todoIn.trim();if(!t)return;saveTodos([...todos,{id:Date.now(),text:t,done:false}]);setTodoIn("");setTimeout(()=>todoRef.current?.focus(),0);};
+
+  // ── CLAP ──────────────────────────────────────────────────────
+  const setupClap=async()=>{
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+      const ctx=new AudioContext();const an=ctx.createAnalyser();
+      ctx.createMediaStreamSource(stream).connect(an);an.fftSize=512;
+      const buf=new Uint8Array(an.frequencyBinCount);let last=0;
+      const detect=()=>{
+        an.getByteFrequencyData(buf);
+        const avg=buf.reduce((a,b)=>a+b,0)/buf.length;const now=Date.now();
+        if(avg>90&&now-last>180){
+          last=now;
+          const times=[...clapRef.current.times.filter(t=>now-t<900),now];
+          clapRef.current.times=times;
+          if(times.length>=2){clapRef.current.times=[];onDoubleClap();}
+        }
+        requestAnimationFrame(detect);
+      };detect();
+    }catch{}
+  };
+  const onDoubleClap=()=>{window.focus();setSpeaking(true);speak("Yes, sir?",()=>{setSpeaking(false);doListen();});};
+
+  // ── VOICE I/O ─────────────────────────────────────────────────
+  const doListen=()=>{
+    if(!('SpeechRecognition' in window)&&!('webkitSpeechRecognition' in window))return;
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    const rec=new SR();rec.lang="en-US";rec.interimResults=false;
+    rec.onresult=e=>{const t=e.results[0][0].transcript;setVoiceHint(t);sendMsg(t,true);};
+    rec.onend=()=>setListening(false);rec.onerror=()=>setListening(false);
+    recRef.current=rec;setListening(true);rec.start();
+  };
+  const stopListening=()=>{recRef.current?.stop();setListening(false);};
+
+  // ── FETCHERS ──────────────────────────────────────────────────
+  const fetchWeather=useCallback(async()=>{
+    go("w");
+    try{const r=await fetch("https://api.open-meteo.com/v1/forecast?latitude=33.1984&longitude=-96.6398&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&temperature_unit=fahrenheit&wind_speed_unit=mph");const d=await r.json();setWeather(d.current||null);}
+    catch{}end("w");
+  },[]);
+
+  const fetchStocks=useCallback(async()=>{
+    go("s");
+    try{
+      const map=await fetchQuotes(ALL_TICKERS);
+      if(Object.keys(map).length>0){setStocks(map);setStockTime(new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"}));}
+    }catch(e){console.error("stocks:",e);}
+    end("s");
+  },[]);
+
+  const fetchFutures=useCallback(async()=>{
+    go("f");
+    try{
+      const map=await fetchQuotes(FUT_TICKERS);
+      const named={};Object.entries(map).forEach(([sym,v])=>{named[FUT_NAMES[sym]||sym]={...v,ticker:FUT_NAMES[sym]||sym};});
+      if(Object.keys(named).length>0)setFutures(named);
+    }catch(e){console.error("futures:",e);}
+    end("f");
+  },[]);
+
+  const fetchNews=useCallback(async()=>{
+    go("n");
+    try{
+      const feeds=[
+        ["https://feeds.marketwatch.com/marketwatch/topstories/","MarketWatch"],
+        ["https://www.cnbc.com/id/100003114/device/rss/rss.html","CNBC"],
+      ];
+      const results=await Promise.allSettled(feeds.map(async([url,src])=>{
+        const d=await proxyFetch(url,5000);
+        // proxyFetch returns JSON from allorigins but text from corsproxy
+        // We need to handle RSS XML
+        throw new Error("need text not json");
+      }));
+      // Try text-based fetch
+      const items=[];
+      for(const[url,src]of feeds){
+        try{
+          const r=await fetch(PROXIES[0](url),{signal:AbortSignal.timeout(5000)});
+          const text=await r.text();
+          const xml=new DOMParser().parseFromString(text,"text/xml");
+          [...xml.querySelectorAll("item")].slice(0,3).forEach(i=>{
+            items.push({
+              headline:i.querySelector("title")?.textContent?.trim()||"",
+              source:src,
+              blurb:(i.querySelector("description")?.textContent||"").replace(/<[^>]*>/g,"").trim().slice(0,130)
+            });
+          });
+        }catch{}
+      }
+      if(items.length>0)setNews(items.slice(0,6));
+    }catch{}
+    end("n");
+  },[]);
+
+  const fetchAll=useCallback(()=>{fetchWeather();fetchStocks();fetchFutures();fetchNews();},[fetchWeather,fetchStocks,fetchFutures,fetchNews]);
+
+  // ── CONTEXT FOR AI ────────────────────────────────────────────
+  const buildCtx=()=>{
+    const parts=[];
+    if(weather){const wi=getWMO(weather.weather_code);parts.push(`Weather: ${Math.round(weather.temperature_2m)}°F ${wi[0]}`);}
+    const sl=Object.values(stocks);
+    if(sl.length){
+      const best=sl.reduce((a,b)=>Number(a.pct)>Number(b.pct)?a:b);
+      const worst=sl.reduce((a,b)=>Number(a.pct)<Number(b.pct)?a:b);
+      parts.push(`Portfolio: ${sl.map(s=>`${s.ticker} ${s.pct>=0?"+":""}${Number(s.pct).toFixed(1)}%`).join(" | ")}`);
+      parts.push(`Best: ${best.ticker} +${Number(best.pct).toFixed(1)}%, Worst: ${worst.ticker} ${Number(worst.pct).toFixed(1)}%`);
+    }
+    const fl=Object.values(futures);
+    if(fl.length)parts.push(`Futures: ${fl.map(f=>`${f.ticker} ${f.pct>=0?"+":""}${Number(f.pct).toFixed(2)}%`).join(" | ")}`);
+    if(news.length)parts.push(`Headlines: ${news.slice(0,3).map(n=>n.headline).join(" | ")}`);
+    if(exams.length)parts.push(`Exams: ${exams.filter(e=>daysUntil(e.date)>=0).map(e=>`${e.name} in ${daysUntil(e.date)}d`).join(", ")}`);
+    if(userNotes)parts.push(`Anish's notes: ${userNotes}`);
+    return parts.length?"\n\nCurrent data:\n"+parts.join("\n"):"";
+  };
+
+  // ── CHAT ──────────────────────────────────────────────────────
+  const sendMsg=async(text,withVoice=false,autoSpeak=false)=>{
+    const txt=(text||chatIn).trim();if(!txt||chatBusy)return;
+    if(!groqKey){setShowGroq(true);return;}
+    const next=[...msgs,{role:"user",content:txt}];
+    setMsgs(next);setChatIn("");setVoiceHint("");setChatBusy(true);
+    try{
+      const sys=JARVIS_SYS+buildCtx();
+      const reply=await groq(next.map(m=>({role:m.role,content:m.content})),sys,groqKey,withVoice||autoSpeak?200:350);
+      setMsgs(p=>[...p,{role:"assistant",content:reply}]);
+      if(withVoice||autoSpeak){setSpeaking(true);speak(reply,()=>setSpeaking(false));}
+    }catch(e){
+      const msg="Having a moment, sir. Try again.";
+      setMsgs(p=>[...p,{role:"assistant",content:msg}]);
+      if(withVoice){setSpeaking(true);speak(msg,()=>setSpeaking(false));}
+    }
+    setChatBusy(false);
+  };
+
+  // ── DERIVED ───────────────────────────────────────────────────
+  const fmtTime=d=>d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  const fmtDate=d=>d.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
+  const greet=()=>{const h=time.getHours();return h<12?"Good morning, sir":h<17?"Good afternoon, sir":"Good evening, sir";};
+  const wInfo=weather?.weather_code!==undefined?getWMO(weather.weather_code):null;
+  const stockList=Object.values(stocks);
+  const futList=Object.values(futures);
+  const best=stockList.length?stockList.reduce((a,b)=>Number(a.pct)>Number(b.pct)?a:b):null;
+  const worst=stockList.length?stockList.reduce((a,b)=>Number(a.pct)<Number(b.pct)?a:b):null;
+  const allRed=stockList.length>0&&stockList.every(s=>Number(s.pct)<0);
+  const allGreen=stockList.length>0&&stockList.every(s=>Number(s.pct)>0);
+  const ECOLS=["#ef4444","#f59e0b","#8b5cf6","#06b6d4"];
+
+  const QUICK=[
+    "What's my best and worst stock right now?",
+    "Any big news I should know about?",
+    "How's NVDA doing?",
+    "Give me a 10-second market summary.",
+  ];
+
+  return(
+    <div style={{background:"#000",minHeight:"100vh",color:"#cce0f5",fontFamily:"'Inter',-apple-system,sans-serif",padding:14,display:"flex",flexDirection:"column",gap:10}}>
+      <style>{`
+        *{box-sizing:border-box;}
+        @keyframes spin{to{transform:rotate(360deg);}}
+        @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.15;}}
+        @keyframes glow{0%,100%{text-shadow:0 0 6px rgba(0,212,255,0.3);}50%{text-shadow:0 0 22px rgba(0,212,255,1),0 0 44px rgba(0,212,255,0.35);}}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(5px);}to{opacity:1;transform:translateY(0);}}
+        @keyframes lp{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,0.5);}60%{box-shadow:0 0 0 8px rgba(34,197,94,0);}}
+        ::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-thumb{background:rgba(0,160,220,0.18);border-radius:4px;}
+        .msg{animation:fadeUp .15s ease;}
+        input:focus,textarea:focus{outline:1px solid rgba(0,200,220,0.3)!important;}
+        button:active{transform:scale(0.97);}
+        input[type=date]{color-scheme:dark;}
+        a{transition:color .15s;}
+      `}</style>
+
+      {showGroq&&<GroqModal onSave={k=>{try{localStorage.setItem("j-groq",k);}catch{}setGroqKey(k);setShowGroq(false);}} onSkip={()=>setShowGroq(false)}/>}
+      {showExam&&<ExamModal onSave={e=>{saveExams([...exams,e]);setShowExam(false);}} onClose={()=>setShowExam(false)}/>}
+
+      {/* HEADER */}
+      <div style={{...C.card,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{...C.mono,fontSize:26,fontWeight:800,color:"#00d4ff",letterSpacing:3,animation:speaking?"glow 1.2s ease infinite":"none"}}>{fmtTime(time)}</div>
+          <div style={{fontSize:10,color:"#0f2030",marginTop:3}}>{fmtDate(time)}</div>
+        </div>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:22,fontWeight:900,letterSpacing:14,color:"#00d4ff",...C.mono}}>JARVIS</div>
+          <div style={{fontSize:9,color:"#0f2030",letterSpacing:"3px",marginTop:2}}>PERSONAL AI · UTD · MCKINNEY TX</div>
+          <div style={{height:15,marginTop:3,display:"flex",justifyContent:"center",alignItems:"center",gap:8}}>
+            {speaking&&<span style={{fontSize:9,color:"#3db8d4",letterSpacing:"2px",...C.mono,animation:"pulse .8s ease infinite"}}>◉ SPEAKING</span>}
+            {listening&&<span style={{fontSize:9,color:"#22c55e",letterSpacing:"2px",...C.mono,animation:"pulse .5s ease infinite"}}>◉ LISTENING</span>}
+            {chatBusy&&!speaking&&!listening&&<span style={{fontSize:9,color:"#f59e0b",letterSpacing:"2px",...C.mono,animation:"pulse .6s ease infinite"}}>◉ THINKING</span>}
+          </div>
+        </div>
+        <div style={{textAlign:"right",display:"flex",flexDirection:"column",alignItems:"flex-end",gap:5}}>
+          <div style={{fontSize:14,fontWeight:600,color:"#90b8e0"}}>{greet()}</div>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>listening?stopListening():doListen()} style={{background:listening?"rgba(34,197,94,0.12)":"rgba(0,150,210,0.1)",border:`1px solid ${listening?"rgba(34,197,94,0.4)":"rgba(0,150,210,0.25)"}`,borderRadius:6,color:listening?"#22c55e":"#3db8d4",padding:"4px 10px",cursor:"pointer",fontSize:10,fontFamily:"inherit",animation:listening?"lp 1.2s ease infinite":"none"}}>{listening?"⏹ Stop":"🎤 Voice"}</button>
+            <button onClick={()=>{stopSpeaking();setSpeaking(false);}} style={{background:"rgba(0,150,210,0.08)",border:"1px solid rgba(0,150,210,0.2)",borderRadius:6,color:"#3db8d4",padding:"4px 8px",cursor:"pointer",fontSize:11}}>🔇</button>
+            {!groqKey&&<button onClick={()=>setShowGroq(true)} style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:6,color:"#22c55e",padding:"4px 8px",cursor:"pointer",fontSize:9,fontFamily:"inherit"}}>+ Free AI</button>}
+          </div>
+          <div style={{fontSize:9,color:"#0f2030",...C.mono}}>stocks ↻ {fmtCD(nextRefresh)}</div>
+        </div>
+      </div>
+
+      {/* FUTURES */}
+      <div style={{...C.card,padding:"8px 14px",display:"flex",alignItems:"center",gap:16,borderColor:"#141e28"}}>
+        <span style={{...C.label,flexShrink:0}}>⚡ Futures</span>
+        <Spin onClick={fetchFutures} spinning={spin.f}/>
+        {spin.f&&futList.length===0&&<span style={C.dim}>Loading...</span>}
+        {futList.map((f,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{...C.mono,fontSize:11,fontWeight:700,color:"#c0d8f0"}}>{f.ticker}</span>
+            <span style={{...C.mono,fontSize:10,color:"#2a3e50"}}>{Number(f.price||0).toLocaleString("en-US",{maximumFractionDigits:0})}</span>
+            <span style={{...C.mono,fontSize:10,fontWeight:700,color:Number(f.pct||0)>=0?C.pos:C.neg}}>{Number(f.pct||0)>=0?"+":""}{Number(f.pct||0).toFixed(2)}%</span>
+          </div>
+        ))}
+      </div>
+
+      {/* EXAMS */}
+      <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+        {exams.filter(e=>daysUntil(e.date)>=-1).map((e,i)=>{
+          const d=daysUntil(e.date);const col=ECOLS[i%ECOLS.length];
+          const label=d<0?"✓ Done":d===0?"TODAY ⚠️":d===1?"Tomorrow":`${d} days`;
+          return(
+            <div key={e.id} style={{flex:1,...C.card,padding:"7px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",borderLeft:`3px solid ${col}`,borderRadius:10,minWidth:160}}>
+              <span style={{fontSize:11,fontWeight:600,color:"#80a0c0"}}>{e.name}</span>
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <span style={{...C.mono,fontSize:12,fontWeight:800,color:d>=0&&d<=2?col:"#405060"}}>{label}</span>
+                <button onClick={()=>saveExams(exams.filter(x=>x.id!==e.id))} style={{background:"none",border:"none",color:"#1a1010",cursor:"pointer",fontSize:13,padding:0}}>×</button>
+              </div>
+            </div>
+          );
+        })}
+        <button onClick={()=>setShowExam(true)} style={{background:"rgba(0,150,210,0.08)",border:"1px solid rgba(0,150,210,0.2)",borderRadius:10,color:"#2a5070",padding:"7px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",whiteSpace:"nowrap"}}>+ Add Exam</button>
+      </div>
+
+      {/* MARKET BAR */}
+      {stockList.length>0&&(
+        <div style={{...C.card,padding:"8px 14px",display:"flex",alignItems:"center",gap:16,borderColor:"#141e28"}}>
+          <span style={{...C.label,flexShrink:0}}>Today</span>
+          <span style={{fontSize:11,fontWeight:700,color:allRed?"#ef4444":allGreen?"#22c55e":"#d0a020"}}>{allRed?"🔴 Red day":allGreen?"🟢 Green day":"🟡 Mixed"}</span>
+          {best&&<span style={{...C.mono,fontSize:11,fontWeight:700,color:C.pos}}>▲ {best.ticker} +{Number(best.pct).toFixed(2)}%</span>}
+          {worst&&<span style={{...C.mono,fontSize:11,fontWeight:700,color:C.neg}}>▼ {worst.ticker} {Number(worst.pct).toFixed(2)}%</span>}
+          {stockTime&&<span style={{fontSize:9,color:"#0f2030",...C.mono,marginLeft:"auto"}}>as of {stockTime}</span>}
+        </div>
+      )}
+
+      {/* MAIN GRID */}
+      <div style={{display:"grid",gridTemplateColumns:"190px 1fr 190px",gap:10,flex:1}}>
+
+        {/* LEFT */}
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {/* Weather */}
+          <div style={C.card}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={C.label}>🌡 McKinney TX</span><Spin onClick={fetchWeather} spinning={spin.w}/>
+            </div>
+            {weather?(
+              <><div style={{...C.mono,fontSize:36,fontWeight:800,color:"#00d4ff",lineHeight:1}}>{Math.round(weather.temperature_2m)}°F</div>
+              {wInfo&&<div style={{fontSize:13,marginTop:6,color:"#70a0c0"}}>{wInfo[1]} {wInfo[0]}</div>}
+              <div style={{fontSize:10,color:"#1a2e40",marginTop:5}}>Feels {Math.round(weather.apparent_temperature)}°F · Wind {Math.round(weather.wind_speed_10m)} mph</div></>
+            ):<div style={C.dim}>{spin.w?"Loading...":"—"}</div>}
+          </div>
+
+          {/* Tasks */}
+          <div style={{...C.card,flex:1,display:"flex",flexDirection:"column"}}>
+            <div style={{...C.label,marginBottom:8}}>📋 Tasks</div>
+            <div style={{display:"flex",gap:5,marginBottom:8}}>
+              <input ref={todoRef} value={todoIn} onChange={e=>setTodoIn(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTodo()} placeholder="Add task..."
+                style={{flex:1,background:"#111",border:"1px solid #1a2e3a",borderRadius:6,padding:"5px 8px",color:"#cce0f5",fontSize:11,outline:"none",fontFamily:"inherit"}}/>
+              <button onClick={addTodo} style={{background:"#0a1e2e",border:"1px solid #1a3a5a",borderRadius:6,color:"#00d4ff",padding:"5px 10px",cursor:"pointer",fontSize:16,...C.mono}}>+</button>
+            </div>
+            <div style={{overflowY:"auto",flex:1}}>
+              {todos.length===0&&<div style={C.dim}>No tasks yet</div>}
+              {todos.map((t,i)=>(
+                <div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:6,padding:"4px 0",borderBottom:i<todos.length-1?"1px solid #0d1520":"none"}}>
+                  <input type="checkbox" checked={t.done} onChange={()=>saveTodos(todos.map(x=>x.id===t.id?{...x,done:!x.done}:x))} style={{cursor:"pointer",accentColor:"#00d4ff",marginTop:2}}/>
+                  <span style={{flex:1,fontSize:11,color:t.done?"#1a2530":"#90b8d8",textDecoration:t.done?"line-through":"none",lineHeight:"1.4"}}>{t.text}</span>
+                  <button onClick={()=>saveTodos(todos.filter(x=>x.id!==t.id))} style={{background:"none",border:"none",color:"#1a1010",cursor:"pointer",fontSize:14,padding:0}}>×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Thoughts */}
+          <div style={C.card}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:noteOpen?8:0}}>
+              <span style={C.label}>💭 Thoughts</span>
+              <button onClick={()=>setNoteOpen(o=>!o)} style={{background:"none",border:"none",color:"#3db8d4",cursor:"pointer",fontSize:10,padding:0,fontFamily:"inherit"}}>{noteOpen?"▲ done":"▼ edit"}</button>
+            </div>
+            {noteOpen?(
+              <><textarea value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder="Notes Jarvis will read..."
+                style={{width:"100%",height:68,background:"#111",border:"1px solid #1a2e3a",borderRadius:6,padding:"6px 8px",color:"#cce0f5",fontSize:11,outline:"none",resize:"none",fontFamily:"inherit",lineHeight:"1.5"}}/>
+              <button onClick={()=>{saveNotes(noteDraft);setNoteOpen(false);}} style={{marginTop:5,width:"100%",background:"rgba(0,150,210,0.1)",border:"1px solid rgba(0,150,210,0.25)",borderRadius:6,color:"#00d4ff",padding:5,cursor:"pointer",fontSize:10,fontFamily:"inherit"}}>Save</button></>
+            ):(
+              <div style={{fontSize:11,color:"#3a5870",lineHeight:"1.5",maxHeight:50,overflow:"hidden"}}>{userNotes||<span style={C.dim}>Tap edit — Jarvis reads these</span>}</div>
+            )}
+          </div>
+        </div>
+
+        {/* CENTER */}
+        <div style={{...C.card,padding:0,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          <div style={{padding:"12px 14px 10px",borderBottom:"1px solid #1a2e3a",flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={C.label}>💬 Chat with Jarvis</span>
+            <button onClick={()=>sendMsg("Quick market rundown, what's most important right now?",false,true)} disabled={!groqKey||chatBusy}
+              style={{background:"rgba(0,150,210,0.1)",border:"1px solid rgba(0,150,210,0.2)",borderRadius:6,color:"#3a7090",padding:"4px 10px",cursor:"pointer",fontSize:10,fontFamily:"inherit",opacity:!groqKey||chatBusy?.5:1}}>
+              📋 Brief me
+            </button>
+          </div>
+
+          <div style={{flex:1,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:10}}>
+            {msgs.length===0&&!chatBusy&&(
+              <div style={{flex:1,display:"flex",flexDirection:"column",justifyContent:"center",alignItems:"center",gap:16}}>
+                {!groqKey?(
+                  <div style={{textAlign:"center"}}>
+                    <div style={{fontSize:13,color:"#3a6070",lineHeight:"1.8",marginBottom:14}}>Connect free AI to start talking to JARVIS.</div>
+                    <button onClick={()=>setShowGroq(true)} style={{background:"rgba(34,197,94,0.15)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,color:"#22c55e",padding:"9px 24px",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>Connect Free AI →</button>
+                  </div>
+                ):(
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"center"}}>
+                    {QUICK.map(p=>(
+                      <button key={p} onClick={()=>sendMsg(p,false,true)} style={{background:"rgba(0,150,210,0.08)",border:"1px solid rgba(0,150,210,0.2)",borderRadius:8,color:"#3a7090",padding:"8px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",lineHeight:"1.4"}}>{p}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {msgs.map((m,i)=>(
+              <div key={i} className="msg" style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+                <div style={{maxWidth:"85%",padding:"10px 14px",fontSize:12,lineHeight:"1.7",whiteSpace:"pre-wrap",
+                  borderRadius:m.role==="user"?"12px 12px 2px 12px":"2px 12px 12px 12px",
+                  background:m.role==="user"?"rgba(0,150,210,0.16)":"#111",
+                  border:m.role==="user"?"1px solid rgba(0,150,210,0.28)":"1px solid #1a2e3a",
+                  color:m.role==="user"?"#b8d8f8":"#90b8cc"}}>
+                  {m.content}
+                  {m.role==="assistant"&&<button onClick={()=>{setSpeaking(true);speak(m.content,()=>setSpeaking(false));}} style={{display:"block",marginTop:8,background:"none",border:"none",color:"#1a3040",cursor:"pointer",fontSize:10,padding:0,fontFamily:"inherit"}}>🔊 play</button>}
+                </div>
+              </div>
+            ))}
+
+            {chatBusy&&(
+              <div style={{display:"flex"}}>
+                <div style={{padding:"10px 14px",borderRadius:"2px 12px 12px 12px",background:"#111",border:"1px solid #1a2e3a",color:"#3db8d4",fontSize:12,...C.mono}}>
+                  <span style={{display:"inline-block",animation:"spin 1s linear infinite"}}>◌</span>&nbsp; Thinking...
+                </div>
+              </div>
+            )}
+            <div ref={chatEnd}/>
+          </div>
+
+          <div style={{padding:"10px 14px",borderTop:"1px solid #1a2e3a",display:"flex",gap:8,flexShrink:0}}>
+            <input value={chatIn||voiceHint} onChange={e=>{setChatIn(e.target.value);setVoiceHint("");}} onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&sendMsg(chatIn,false,false)}
+              placeholder={groqKey?"Ask Jarvis anything...":"Connect free AI first →"} disabled={chatBusy}
+              style={{flex:1,background:"#111",border:"1px solid #1a2e3a",borderRadius:8,padding:"9px 12px",color:"#cce0f5",fontSize:12,outline:"none",fontFamily:"inherit",opacity:chatBusy?.6:1}}/>
+            <button onClick={()=>listening?stopListening():doListen()} style={{background:listening?"rgba(34,197,94,0.12)":"rgba(0,150,210,0.08)",border:`1px solid ${listening?"rgba(34,197,94,0.4)":"rgba(0,150,210,0.2)"}`,borderRadius:8,color:listening?"#22c55e":"#3db8d4",padding:"9px 11px",cursor:"pointer",fontSize:14,animation:listening?"lp 1.2s ease infinite":"none"}}>🎤</button>
+            <button onClick={()=>sendMsg(chatIn,false,false)} disabled={chatBusy||!groqKey} style={{background:"rgba(0,150,210,0.15)",border:"1px solid rgba(0,150,210,0.3)",borderRadius:8,color:"#00d4ff",padding:"9px 14px",cursor:"pointer",fontSize:14,opacity:chatBusy||!groqKey?.35:1}}>➤</button>
+          </div>
+        </div>
+
+        {/* RIGHT */}
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {/* Portfolio */}
+          <div style={C.card}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <span style={C.label}>📈 Portfolio · 1D</span><Spin onClick={fetchStocks} spinning={spin.s}/>
+            </div>
+            {GROUPS.map(g=>(
+              <div key={g.label} style={{marginBottom:10}}>
+                <div style={{fontSize:8,color:"#1a2e3a",letterSpacing:"1.5px",textTransform:"uppercase",...C.mono,marginBottom:4,paddingBottom:3,borderBottom:"1px solid #0d1820"}}>{g.label}</div>
+                {g.tickers.map(ticker=>{
+                  const s=stocks[ticker];const pos=s?Number(s.pct)>=0:null;const col=pos===null?"#1e3040":pos?C.pos:C.neg;
+                  return(
+                    <div key={ticker} style={{display:"grid",gridTemplateColumns:"auto 1fr auto",alignItems:"center",gap:6,padding:"4px 0",borderBottom:"1px solid #080e16"}}>
+                      <span style={{...C.mono,fontWeight:700,fontSize:11,color:"#c8e0f8"}}>{ticker}</span>
+                      {s?<div style={{width:"100%",height:2,background:"#0d1620",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${Math.min(Math.abs(Number(s.pct||0))*8,100)}%`,background:col,borderRadius:2}}/></div>:<div/>}
+                      <div style={{textAlign:"right"}}>
+                        {s?(<><div style={{...C.mono,fontSize:9,color:"#304050"}}>${Number(s.price||0).toFixed(2)}</div>
+                        <div style={{...C.mono,fontSize:10,fontWeight:700,color:col}}>{pos?"+":""}{Number(s.pct||0).toFixed(2)}%</div></>)
+                        :<span style={{fontSize:10,color:"#1a2e3a"}}>{spin.s?"…":"—"}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+
+          {/* Calendar */}
+          <div style={C.card}>
+            <div style={{...C.label,marginBottom:10}}>📅 Calendar</div>
+            <a href="https://calendar.google.com" target="_blank" rel="noreferrer"
+              style={{display:"block",background:"rgba(0,150,210,0.08)",border:"1px solid rgba(0,150,210,0.2)",borderRadius:8,padding:"9px 12px",color:"#3a7090",textDecoration:"none",fontSize:11,textAlign:"center",marginBottom:8}}>Open Google Calendar ↗</a>
+            <div style={{fontSize:10,color:"#1a2e3a",lineHeight:"1.6"}}>Add exams with the "+ Add Exam" button above.</div>
+          </div>
+
+          {/* Quick Links */}
+          <div style={{...C.card,flex:1}}>
+            <div style={{...C.label,marginBottom:10}}>🔗 Quick Links</div>
+            {[["Schwab","https://client.schwab.com"],["Finviz","https://finviz.com"],["UTD Orion","https://orion.utdallas.edu"],["micro1","https://app.micro1.ai"],["Yahoo Finance","https://finance.yahoo.com"],["Groq Console","https://console.groq.com"]].map(([l,u])=>(
+              <a key={l} href={u} target="_blank" rel="noreferrer" style={{display:"block",padding:"6px 0",borderBottom:"1px solid #0d1820",color:"#3a6080",textDecoration:"none",fontSize:11}}>{l} <span style={{color:"#1a2e3a",fontSize:9}}>↗</span></a>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* NEWS */}
+      <div style={C.card}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <span style={C.label}>📰 Market News</span>
+          <Spin onClick={fetchNews} spinning={spin.n}/>
+        </div>
+        {news.length>0?(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+            {news.slice(0,6).map((n,i)=>(
+              <div key={i} style={{background:"#080808",border:"1px solid #111e28",borderRadius:8,padding:"10px 12px"}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#e0ecf8",lineHeight:"1.4",marginBottom:5}}>{n.headline}</div>
+                <div style={{fontSize:9,color:"#1a2e3a",fontWeight:700,letterSpacing:"1px",textTransform:"uppercase",...C.mono,marginBottom:4}}>{n.source}</div>
+                {n.blurb&&<div style={{fontSize:10,color:"#2a4050",lineHeight:"1.45"}}>{n.blurb}</div>}
+              </div>
+            ))}
+          </div>
+        ):<div style={C.dim}>{spin.n?"Loading headlines...":"Tap ↺ to refresh"}</div>}
+      </div>
+
+      <div style={{textAlign:"center",fontSize:9,color:"#0a1820",paddingBottom:2,...C.mono}}>
+        JARVIS FREE · Yahoo Finance · Groq AI · Double-clap to wake ·&nbsp;
+        {groqKey&&<button onClick={()=>{try{localStorage.removeItem("j-groq");}catch{}setGroqKey("");autoBriefDone.current=false;}} style={{background:"none",border:"none",color:"#0a1820",cursor:"pointer",fontSize:9,...C.mono,textDecoration:"underline"}}>reset AI</button>}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Dashboard/>);
+</script>
+</body>
+</html>
